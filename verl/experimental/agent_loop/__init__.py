@@ -14,8 +14,9 @@
 
 from .agent_loop import AgentLoopBase, AgentLoopManager, AsyncLLMServerManager
 from .single_turn_agent_loop import SingleTurnAgentLoop
+from .think_retrieve_revise_agent_loop import ThinkRetrieveReviseAgentLoop
 from .tool_agent_loop import ToolAgentLoop
 
-_ = [SingleTurnAgentLoop, ToolAgentLoop]
+_ = [SingleTurnAgentLoop, ToolAgentLoop, ThinkRetrieveReviseAgentLoop]
 
 __all__ = ["AgentLoopBase", "AgentLoopManager", "AsyncLLMServerManager"]
