@@ -230,22 +230,6 @@ class ThinkRetrieveReviseAgentLoop(AgentLoopBase):
         extra_fields["actions_log_likelihood"] = actions_loglik
 
         gt_text = kwargs.get("ground_truth") or kwargs.get("solution")
-        if isinstance(gt_text, str):
-            extra_fields["ground_truth"] = gt_text
-            actions_match = actions_text.strip() == gt_text.strip()
-            extra_fields["actions_match_ground_truth"] = actions_match
-        else:
-            actions_match = False
-
-        reward_score = None
-        if actions_loglik is not None:
-            reward_score = actions_loglik
-            if actions_match:
-                extra_fields["ground_truth_log_likelihood"] = actions_loglik
-            else:
-                extra_fields["ground_truth_log_likelihood"] = None
-        else:
-            extra_fields["ground_truth_log_likelihood"] = None
 
         return AgentLoopOutput(
             prompt_ids=prompt_ids_initial,
@@ -255,7 +239,6 @@ class ThinkRetrieveReviseAgentLoop(AgentLoopBase):
             multi_modal_data=multi_modal_data,
             num_turns=num_turns,
             metrics=metrics_model,
-            reward_score=reward_score,
             extra_fields=extra_fields,
         )
 
