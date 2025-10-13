@@ -1,6 +1,9 @@
 #!/bin/bash
 # Training script for Think-Retrieve-Revise agent loop with text overlap reward
 
+unset ROCR_VISIBLE_DEVICES
+unset HIP_VISIBLE_DEVICES
+
 set -x
 
 # Configuration
@@ -8,6 +11,11 @@ PROJECT_DIR="$(pwd)"
 DATASET_NAME="pack_data"
 MODEL_PATH="Qwen/Qwen2.5-VL-7B-Instruct"  # e.g., "Qwen/Qwen2.5-7B-Instruct"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+# Wandb configuration
+export WANDB_API_KEY="${WANDB_API_KEY:-25dd9b773838ca659e1a9d3cc8ef206dae0a3275}"
+export WANDB_MODE="${WANDB_MODE:-online}"  # Set to "offline" if you want to log offline
+export WANDB_DIR="${WANDB_DIR:-./wandb_logs}"
 
 # Create agent loop config
 AGENT_CONFIG_PATH="$PROJECT_DIR/recipe/think_retrieve_revise/agent_config.yaml"
@@ -32,11 +40,11 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=32 \
-    actor_rollout_ref.model.target_modules='["gate_proj","up_proj","down_proj"]' \
-    actor_rollout_ref.model.exclude_modules='.*visual.*' \
+    actor_rollout_ref.model.target_modules=all-linear \
+    actor_rollout_ref.model.exclude_modules=\'.*visual.*,visual.*\' \
     actor_rollout_ref.actor.optim.lr=3e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
-    actor_rollout_ref.actor.ppo_micro_batch_size=2 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=16 \
+    +actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \

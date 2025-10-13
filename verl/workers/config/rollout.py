@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass, field
+import dataclasses
+from dataclasses import dataclass, field, fields
 from typing import Optional
 
 from omegaconf import MISSING
@@ -177,6 +178,31 @@ class RolloutConfig(BaseConfig):
     limit_images: Optional[int] = None
 
     skip_tokenizer_init: bool = False
+
+    def __init__(self, **kwargs):
+        """Initialize RolloutConfig with support for arbitrary keyword arguments."""
+        # Get all defined fields
+        field_names = {f.name for f in fields(self)}
+        
+        # Set defined fields
+        for field in fields(self):
+            if field.name in kwargs:
+                setattr(self, field.name, kwargs.pop(field.name))
+            elif field.default != dataclasses.MISSING:
+                setattr(self, field.name, field.default)
+            elif field.default_factory != dataclasses.MISSING:
+                setattr(self, field.name, field.default_factory())
+            else:
+                # Required field without default
+                if field.name != '_target_':  # _target_ is handled by BaseConfig
+                    raise TypeError(f"Missing required field: {field.name}")
+        
+        # Set any additional fields (for agent-specific configs)
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        
+        # Call post_init for validation
+        self.__post_init__()
 
     def __post_init__(self):
         """Validate the rollout config"""
