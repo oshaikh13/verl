@@ -1,0 +1,2 @@
+- name: think_retrieve_revise_agent
+  _target_: verl.experimental.agent_loop.think_retrieve_revise_agent_loop.ThinkRetrieveReviseAgentLoop
