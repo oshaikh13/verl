@@ -12,10 +12,22 @@ DATASET_NAME="pack_data"
 MODEL_PATH="Qwen/Qwen2.5-VL-7B-Instruct"  # e.g., "Qwen/Qwen2.5-7B-Instruct"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
+# in addtion, upgrade vllm to 0.11.0
+
 # Wandb configuration
 export WANDB_API_KEY="${WANDB_API_KEY:-25dd9b773838ca659e1a9d3cc8ef206dae0a3275}"
 export WANDB_MODE="${WANDB_MODE:-online}"  # Set to "offline" if you want to log offline
 export WANDB_DIR="${WANDB_DIR:-./wandb_logs}"
+# export RAY_DEBUG_POST_MORTEM=1
+
+# Start Ray cluster on specific port (will skip if already running on that port)
+RAY_PORT=42012
+RAY_ADDRESS="127.0.0.1:${RAY_PORT}"
+RAY_NUM_CPUS=16
+RAY_NUM_GPUS=2
+echo "Starting/connecting to Ray cluster on port ${RAY_PORT}..."
+# RAY_DEBUG=legacy ray start --head --port=${RAY_PORT} --num-cpus=${RAY_NUM_CPUS} --num-gpus=${RAY_NUM_GPUS} --dashboard-host=0.0.0.0 2>&1 | grep -v "Ray runtime started" || true
+ray start --head --port=${RAY_PORT} --num-cpus=${RAY_NUM_CPUS} --num-gpus=${RAY_NUM_GPUS} --dashboard-host=0.0.0.0 2>&1 | grep -v "Ray runtime started" || true
 
 # Create agent loop config
 AGENT_CONFIG_PATH="$PROJECT_DIR/recipe/think_retrieve_revise/agent_config.yaml"
@@ -34,6 +46,7 @@ python3 -m verl.trainer.main_ppo \
     data.max_response_length=2048 \
     data.image_key=images \
     data.trust_remote_code=True \
+    data.dataloader_num_workers=2 \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -67,8 +80,11 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.rollout.think_retrieve_revise.retriever_top_k=6 \
     +actor_rollout_ref.rollout.think_retrieve_revise.time_decay_lambda=0.1 \
     +actor_rollout_ref.rollout.think_retrieve_revise.dedup_threshold=0.85 \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_mm_preprocessor_cache=True \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size=2 \
+    actor_rollout_ref.rollout.enforce_eager=False \
+    actor_rollout_ref.rollout.free_cache_engine=True \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
@@ -81,4 +97,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=20 \
     trainer.default_local_dir="/scr/biggest/oshaikh/checkpoints/think_retrieve_revise_experiment/trr_${DATASET_NAME}_lora_${TIMESTAMP}" \
     custom_reward_function.path=$PROJECT_DIR/recipe/think_retrieve_revise/reward_function.py \
-    custom_reward_function.name=compute_score
+    custom_reward_function.name=compute_score \
+    +ray_kwargs.ray_init.address=127.0.0.1:42012

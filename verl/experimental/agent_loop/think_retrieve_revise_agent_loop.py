@@ -22,6 +22,8 @@ import time
 from typing import Any, Iterable, Optional
 from uuid import uuid4
 
+import ray
+
 from verl.experimental.agent_loop.agent_loop import (AgentLoopBase,
                                                      AgentLoopMetrics,
                                                      AgentLoopOutput, register)
@@ -86,6 +88,8 @@ class ThinkRetrieveReviseAgentLoop(AgentLoopBase):
         cls._retriever = InMemoryBM25Temporal()
         cls._retriever_lock = asyncio.Lock()
 
+
+    @ray.remote
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         metrics: dict[str, float] = {}
         extra_fields: dict[str, Any] = {}
