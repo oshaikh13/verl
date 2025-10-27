@@ -32,11 +32,13 @@ import inspect
 import logging
 import os
 import pickle
+import re
 import time
 from contextlib import contextmanager
 from dataclasses import asdict
+from functools import partial
 from types import MethodType
-from typing import Any, Generator
+from typing import Any, Generator, Sequence
 
 import numpy as np
 import ray
@@ -69,22 +71,23 @@ except ModuleNotFoundError:
     from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 from verl import DataProto
+from verl.retriever import DistributedRetriever, InMemoryBM25Temporal
 from verl.third_party.vllm import VLLM_SLEEP_LEVEL
 from verl.utils.device import is_npu_available
 from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.ray_utils import ray_noset_visible_devices
-from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
+from verl.utils.retrieval import jaccard_ngrams, mmr_select
+from verl.utils.torch_functional import (get_response_mask,
+                                         pad_2d_list_to_length)
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack, is_version_ge
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.utils import get_free_port, is_valid_ipv6_address
-from verl.workers.rollout.vllm_rollout.utils import (
-    VLLM_LORA_INT_ID,
-    VLLM_LORA_NAME,
-    VLLM_LORA_PATH,
-    get_vllm_max_lora_rank,
-)
+from verl.workers.rollout.vllm_rollout.utils import (VLLM_LORA_INT_ID,
+                                                     VLLM_LORA_NAME,
+                                                     VLLM_LORA_PATH,
+                                                     get_vllm_max_lora_rank)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -249,7 +252,25 @@ class vLLMRollout(BaseRollout):
         print(f"kwargs: {kwargs}")
         self.sampling_params = SamplingParams(**kwargs)
 
+        self.tokenizer = tokenizer
         self.pad_token_id = tokenizer.pad_token_id
+
+        self.think_cfg = getattr(config, "think_revise", None)
+        if self.think_cfg and self.think_cfg.enable:
+            dedup_fn = partial(jaccard_ngrams, n=3)
+            retriever_factory = partial(
+                InMemoryBM25Temporal,
+                dedup_threshold=self.think_cfg.dedup_jaccard,
+                dedup_sim_fn=dedup_fn,
+            )
+            self._dist_retr = DistributedRetriever(
+                retriever_factory=retriever_factory,
+                default_namespace=self.think_cfg.memory_namespace,
+                shared=self.think_cfg.share_across_workers,
+                actor_name=self.think_cfg.actor_name,
+            )
+        else:
+            self._dist_retr = None
 
     @contextmanager
     def update_sampling_params(self, **kwargs):
@@ -290,6 +311,9 @@ class vLLMRollout(BaseRollout):
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
+        if self.think_cfg and self.think_cfg.enable:
+            return self._generate_sequences_think_revise(prompts)
+
         idx = prompts.batch["input_ids"]  # (bs, prompt_length)
         # left-padded attention_mask
         attention_mask = prompts.batch["attention_mask"]
@@ -427,6 +451,359 @@ class vLLMRollout(BaseRollout):
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
+    def _generate_sequences_think_revise(self, prompts: DataProto) -> DataProto:
+        idx = prompts.batch["input_ids"]
+        attention_mask = prompts.batch["attention_mask"]
+        position_ids = prompts.batch["position_ids"]
+        batch_size = idx.size(0)
+
+        eos_token_id = prompts.meta_info["eos_token_id"]
+        prompt_length = idx.size(1)
+
+        non_tensor_batch = prompts.non_tensor_batch
+        if "raw_prompt_ids" not in non_tensor_batch:
+            raise ValueError("think/revise loop requires 'raw_prompt_ids' in non_tensor_batch.")
+
+        raw_prompt_ids_arr = non_tensor_batch.pop("raw_prompt_ids")
+        raw_prompt_ids_list = [list(map(int, seq)) for seq in raw_prompt_ids_arr.tolist()]
+
+        if "multi_modal_data" in non_tensor_batch:
+            multi_modal_data_arr = non_tensor_batch.pop("multi_modal_data")
+            multi_modal_list = list(multi_modal_data_arr.tolist())
+        else:
+            multi_modal_list = [None] * batch_size
+
+        think_cfg = self.think_cfg
+        tokenizer = self.tokenizer
+
+        def _extract_int_field(field_name: str, default_val: int) -> list[int]:
+            arr = non_tensor_batch.get(field_name)
+            if arr is None:
+                return [default_val] * batch_size
+            values = arr.tolist()
+            result: list[int] = []
+            for value in values:
+                try:
+                    result.append(int(value))
+                except (TypeError, ValueError):
+                    result.append(default_val)
+            return result
+
+        n_claims_list = _extract_int_field(think_cfg.n_claims_field, think_cfg.default_n_claims)
+        future_len_list = _extract_int_field(think_cfg.future_len_field, think_cfg.default_future_len)
+
+        ts_arr = non_tensor_batch.get(think_cfg.timestamp_field)
+        default_ts = int(prompts.meta_info.get("global_steps", 0))
+        if ts_arr is None:
+            now_ts_list = [default_ts] * batch_size
+        else:
+            now_ts_list = []
+            for value in ts_arr.tolist():
+                try:
+                    now_ts_list.append(int(value))
+                except (TypeError, ValueError):
+                    now_ts_list.append(default_ts)
+
+        instruction_tokens_list: list[list[int]] = []
+        current_prompt_tokens: list[list[int]] = []
+        for base_tokens, n_claims in zip(raw_prompt_ids_list, n_claims_list, strict=True):
+            instruction_text = "\n" + think_cfg.think_instruction.format(n_claims=n_claims)
+            instruction_tokens = tokenizer.encode(instruction_text, add_special_tokens=False)
+            instruction_tokens_list.append(instruction_tokens)
+            current_prompt_tokens.append(list(base_tokens) + instruction_tokens)
+
+        think_ids_list, think_logps_list = self._run_vllm_prompts(
+            current_prompt_tokens,
+            multi_modal_list,
+            stop=think_cfg.think_stop,
+            max_tokens=think_cfg.think_max_tokens,
+        )
+
+        think_texts = [
+            tokenizer.decode(ids, skip_special_tokens=False) if ids else ""
+            for ids in think_ids_list
+        ]
+
+        if self._dist_retr and think_cfg.retriever_top_k > 0:
+            hits_lists = self._dist_retr.query_batch(
+                queries=think_texts,
+                cutoff_ts_list=now_ts_list,
+                top_k=think_cfg.retriever_top_k,
+                time_decay_lambda=think_cfg.time_decay_lambda,
+                namespaces=[think_cfg.memory_namespace] * batch_size,
+            )
+            selected_hits = []
+            sim_fn = lambda a, b: jaccard_ngrams(a, b, n=3)
+            for hits in hits_lists:
+                if not hits:
+                    selected_hits.append([])
+                    continue
+                items = [(hit.get("text", ""), float(hit.get("score", 0.0)), hit) for hit in hits]
+                chosen = mmr_select(items=items, sim_fn=sim_fn, top_m=think_cfg.memory_top_m, alpha=think_cfg.mmr_alpha)
+                selected_hits.append(chosen)
+        else:
+            selected_hits = [[] for _ in range(batch_size)]
+
+        retrieved_texts = []
+        for hits in selected_hits:
+            if not hits:
+                retrieved_texts.append("- (none)")
+            else:
+                retrieved_texts.append("\n".join(item[0] for item in hits if item[0]))
+
+        revise_suffix_tokens_list: list[list[int]] = []
+        current_prompt_tokens_stage2: list[list[int]] = []
+
+        for prompt_tokens, think_ids, retrieved, n_claims in zip(
+            current_prompt_tokens,
+            think_ids_list,
+            retrieved_texts,
+            n_claims_list,
+            strict=True,
+        ):
+            suffix_text = "</think>\n" + think_cfg.revise_instruction.format(
+                retrieved=retrieved,
+                n_claims=n_claims,
+            )
+            suffix_tokens = tokenizer.encode(suffix_text, add_special_tokens=False)
+            revise_suffix_tokens_list.append(suffix_tokens)
+            current_prompt_tokens_stage2.append(prompt_tokens + think_ids + suffix_tokens)
+
+        revise_ids_list, revise_logps_list = self._run_vllm_prompts(
+            current_prompt_tokens_stage2,
+            multi_modal_list,
+            stop=think_cfg.revise_stop,
+            max_tokens=think_cfg.revise_max_tokens,
+        )
+
+        revise_texts = [
+            tokenizer.decode(ids, skip_special_tokens=False) if ids else ""
+            for ids in revise_ids_list
+        ]
+
+        actions_suffix_tokens_list: list[list[int]] = []
+        current_prompt_tokens_stage3: list[list[int]] = []
+
+        for prompt_tokens, revise_ids, future_len in zip(
+            current_prompt_tokens_stage2,
+            revise_ids_list,
+            future_len_list,
+            strict=True,
+        ):
+            suffix_text = "</revise>\n" + think_cfg.actions_instruction.format(future_len=future_len)
+            suffix_tokens = tokenizer.encode(suffix_text, add_special_tokens=False)
+            actions_suffix_tokens_list.append(suffix_tokens)
+            current_prompt_tokens_stage3.append(prompt_tokens + revise_ids + suffix_tokens)
+
+        actions_ids_list, actions_logps_list = self._run_vllm_prompts(
+            current_prompt_tokens_stage3,
+            multi_modal_list,
+            stop=think_cfg.actions_stop,
+            max_tokens=think_cfg.actions_max_tokens,
+        )
+
+        if self._dist_retr:
+            rows = []
+            for revise_text, now_ts in zip(revise_texts, now_ts_list, strict=True):
+                claims = self._extract_claims(revise_text)
+                if not claims:
+                    fallback = revise_text.strip()
+                    if fallback:
+                        claims = [fallback]
+                for claim in claims:
+                    rows.append(
+                        {
+                            "text": claim,
+                            "now_ts": now_ts,
+                            "utility": 0.0,
+                        }
+                    )
+            if rows:
+                self._dist_retr.add_candidates(rows, visible_delay=think_cfg.visible_delay)
+
+        response_sequences: list[list[int]] = []
+        mask_sequences: list[list[int]] = []
+        logprob_sequences: list[list[float]] = []
+        need_logprobs = self.config.calculate_log_probs
+        max_response_length = self.config.response_length
+
+        for (
+            instruction_tokens,
+            think_ids,
+            think_logps,
+            revise_suffix_tokens,
+            revise_ids,
+            revise_logps,
+            actions_suffix_tokens,
+            actions_ids,
+            actions_logps,
+        ) in zip(
+            instruction_tokens_list,
+            think_ids_list,
+            think_logps_list,
+            revise_suffix_tokens_list,
+            revise_ids_list,
+            revise_logps_list,
+            actions_suffix_tokens_list,
+            actions_ids_list,
+            actions_logps_list,
+            strict=True,
+        ):
+            seq = (
+                list(instruction_tokens)
+                + list(think_ids)
+                + list(revise_suffix_tokens)
+                + list(revise_ids)
+                + list(actions_suffix_tokens)
+                + list(actions_ids)
+            )
+            mask = (
+                [0] * len(instruction_tokens)
+                + [1] * len(think_ids)
+                + [0] * len(revise_suffix_tokens)
+                + [1] * len(revise_ids)
+                + [0] * len(actions_suffix_tokens)
+                + [1] * len(actions_ids)
+            )
+            if need_logprobs:
+                log_seq = (
+                    [0.0] * len(instruction_tokens)
+                    + [float(v) for v in think_logps]
+                    + [0.0] * len(revise_suffix_tokens)
+                    + [float(v) for v in revise_logps]
+                    + [0.0] * len(actions_suffix_tokens)
+                    + [float(v) for v in actions_logps]
+                )
+            else:
+                log_seq = []
+
+            if len(seq) > max_response_length:
+                seq = seq[:max_response_length]
+                mask = mask[:max_response_length]
+                if need_logprobs:
+                    log_seq = log_seq[:max_response_length]
+
+            response_sequences.append(seq)
+            mask_sequences.append(mask)
+            if need_logprobs:
+                logprob_sequences.append(log_seq)
+
+        response = pad_2d_list_to_length(
+            response_sequences,
+            padding_value=self.pad_token_id,
+            max_length=max_response_length,
+        ).to(idx.device)
+
+        response_mask = pad_2d_list_to_length(
+            mask_sequences,
+            padding_value=0,
+            max_length=max_response_length,
+        ).to(idx.device)
+        response_mask = response_mask.to(attention_mask.dtype)
+
+        if need_logprobs:
+            rollout_log_probs = pad_2d_list_to_length(
+                logprob_sequences,
+                padding_value=0.0,
+                max_length=max_response_length,
+            ).to(idx.device)
+            rollout_log_probs = rollout_log_probs.to(torch.float32)
+        else:
+            rollout_log_probs = None
+
+        seq = torch.cat([idx, response], dim=-1)
+
+        response_length = response.size(1)
+        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
+        delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
+        if position_ids.dim() == 3:
+            delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, position_ids.size(1), -1)
+
+        response_position_ids = position_ids[..., -1:] + delta_position_id
+        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+
+        response_attention_mask = (response != self.pad_token_id).to(attention_mask.dtype)
+        attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+
+        batch = TensorDict(
+            {
+                "prompts": idx,
+                "responses": response,
+                "input_ids": seq,
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "response_mask": response_mask,
+            },
+            batch_size=batch_size,
+        )
+
+        if need_logprobs and rollout_log_probs is not None:
+            batch["rollout_log_probs"] = rollout_log_probs
+
+        return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
+
+    def _run_vllm_prompts(
+        self,
+        prompt_token_ids: Sequence[Sequence[int]],
+        multi_modal_list: Sequence | None,
+        stop: str | None,
+        max_tokens: int,
+    ) -> tuple[list[list[int]], list[list[float]]]:
+        vllm_inputs = []
+        multi_modal_list = multi_modal_list or [None] * len(prompt_token_ids)
+        for tokens, multi_modal in zip(prompt_token_ids, multi_modal_list, strict=True):
+            entry = {"prompt_token_ids": list(tokens)}
+            if multi_modal is not None:
+                entry["multi_modal_data"] = multi_modal
+            vllm_inputs.append(entry)
+
+        sampling_kwargs = {"max_tokens": max_tokens}
+        if stop:
+            sampling_kwargs["stop"] = [stop]
+        if self.config.calculate_log_probs:
+            sampling_kwargs["logprobs"] = max(1, getattr(self.sampling_params, "logprobs", 0) or 0)
+
+        with self.update_sampling_params(**sampling_kwargs):
+            outputs = self.inference_engine.generate(
+                prompts=vllm_inputs,
+                sampling_params=self.sampling_params,
+                use_tqdm=False,
+            )
+
+        ids_list: list[list[int]] = []
+        logps_list: list[list[float]] = []
+        need_logprobs = self.config.calculate_log_probs
+        for output in outputs:
+            sample_output = output.outputs[0]
+            ids = list(sample_output.token_ids)
+            ids_list.append(ids)
+            if need_logprobs:
+                curr_logps: list[float] = []
+                for token_id, logprob_dict in zip(ids, sample_output.logprobs):
+                    if token_id in logprob_dict:
+                        curr_logps.append(float(logprob_dict[token_id].logprob))
+                    elif logprob_dict:
+                        curr_logps.append(float(next(iter(logprob_dict.values())).logprob))
+                    else:
+                        curr_logps.append(0.0)
+                logps_list.append(curr_logps)
+            else:
+                logps_list.append([])
+
+        return ids_list, logps_list
+
+    @staticmethod
+    def _extract_claims(text: str) -> list[str]:
+        if not text:
+            return []
+        pattern = re.compile(r"<claim>(.*?)</claim>", flags=re.IGNORECASE | re.DOTALL)
+        claims = []
+        for match in pattern.findall(text):
+            cleaned = match.strip()
+            if cleaned:
+                claims.append(f"<claim>{cleaned}</claim>")
+        return claims
+
     async def resume(self, tags: list[str]):
         """Resume rollout weights or kv cache in GPU memory.
 
@@ -469,7 +846,8 @@ class vLLMRollout(BaseRollout):
             self.inference_engine.llm_engine.add_lora(lora_reqest)
             logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
         else:
-            from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
+            from verl.utils.vllm.patch import \
+                patch_vllm_moe_model_weight_loader
 
             model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
             patch_vllm_moe_model_weight_loader(model)
@@ -624,7 +1002,8 @@ class vLLMAsyncRollout(BaseRollout):
             self.inference_engine.worker.add_lora(lora_request)
             logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
         else:
-            from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
+            from verl.utils.vllm.patch import \
+                patch_vllm_moe_model_weight_loader
 
             model = self.inference_engine.worker.model_runner.model
             patch_vllm_moe_model_weight_loader(model)

@@ -27,6 +27,7 @@ __all__ = [
     "AgentLoopConfig",
     "TraceConfig",
     "ServerConfig",
+    "ThinkReviseConfig",
     "RolloutConfig",
 ]
 
@@ -92,6 +93,46 @@ class ServerConfig(BaseConfig):
 
 
 @dataclass
+class ThinkReviseConfig(BaseConfig):
+    enable: bool = False
+    n_claims_field: str = "n_claims"
+    future_len_field: str = "future_len"
+    timestamp_field: str = "ts"
+    default_n_claims: int = 3
+    default_future_len: int = 3
+    think_max_tokens: int = 256
+    revise_max_tokens: int = 256
+    actions_max_tokens: int = 256
+    think_stop: str = "</think>"
+    revise_stop: str = "</revise>"
+    actions_stop: str = "</actions>"
+    think_instruction: str = (
+        "Analyze the user’s likely next steps. First, generate exactly {n_claims} claim about the user.\n"
+        "Output them ONLY as <claim>...</claim> tags inside the <think> block."
+    )
+    revise_instruction: str = (
+        "Here are retrieved claims and context (time-aware):\n{retrieved}\n\n"
+        "Using your claims and the retrieved context, generate a final set of {n_claims} revised claims.\n"
+        "Output them ONLY as <claim>...</claim> tags inside a <revise> block."
+    )
+    actions_instruction: str = (
+        "Now, using your claims, generate exactly {future_len} next actions the user will take.\n"
+        "Output them ONLY as <action>...</action> tags inside <actions> block, with each action wrapped in its own <action> tag."
+    )
+    retriever_top_k: int = 8
+    memory_top_m: int = 3
+    mmr_alpha: float = 0.7
+    dedup_jaccard: float = 0.95
+    time_decay_lambda: float | None = None
+    memory_namespace: str = "global"
+    visible_delay: int = 1
+    use_full_prompt_field: bool = False
+    full_prompt_field: str = "full_prompts"
+    share_across_workers: bool = False
+    actor_name: Optional[str] = None
+
+
+@dataclass
 class RolloutConfig(BaseConfig):
     _mutable_fields = {"max_model_len", "load_format"}
 
@@ -153,6 +194,8 @@ class RolloutConfig(BaseConfig):
 
     # Server configuration for sglang server mode
     server: ServerConfig = field(default_factory=ServerConfig)
+
+    think_revise: ThinkReviseConfig = field(default_factory=ThinkReviseConfig)
 
     update_weights_bucket_megabytes: int = 512
 
