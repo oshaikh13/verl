@@ -512,6 +512,8 @@ class vLLMRollout(BaseRollout):
             instruction_tokens_list.append(instruction_tokens)
             current_prompt_tokens.append(list(base_tokens) + instruction_tokens)
 
+        breakpoint()
+
         think_ids_list, think_logps_list = self._run_vllm_prompts(
             current_prompt_tokens,
             multi_modal_list,

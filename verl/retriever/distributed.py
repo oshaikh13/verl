@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Callable, Iterable, Sequence
 
 try:
@@ -148,12 +149,33 @@ class DistributedRetriever:
             name = actor_name or f"verl_think_retriever_{default_namespace}"
             try:
                 self._actor = ray.get_actor(name)
+                logger.info(f"Retrieved existing Ray actor: {name}")
             except ValueError:
-                self._actor = _RetrieverServer.options(
-                    name=name,
-                    max_concurrency=8,
-                    lifetime="detached",
-                ).remote(factory_bytes, default_namespace)
+                # Actor doesn't exist, try to create it
+                try:
+                    self._actor = _RetrieverServer.options(
+                        name=name,
+                        max_concurrency=8,
+                        lifetime="detached",
+                    ).remote(factory_bytes, default_namespace)
+                    logger.info(f"Created new Ray actor: {name}")
+                except ValueError as e:
+                    # Another worker created it between our check and creation attempt
+                    # This is expected in multi-worker initialization
+                    if "already exists" in str(e):
+                        logger.info(f"Actor {name} was created by another worker, retrieving it")
+                        # Retry with exponential backoff in case actor is still registering
+                        for attempt in range(5):
+                            try:
+                                self._actor = ray.get_actor(name)
+                                break
+                            except ValueError:
+                                if attempt < 4:
+                                    time.sleep(0.1 * (2 ** attempt))  # 0.1s, 0.2s, 0.4s, 0.8s, 1.6s
+                                else:
+                                    raise
+                    else:
+                        raise
         else:
             self._actor = None
             self._retriever = retriever_factory()
