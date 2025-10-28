@@ -12,9 +12,12 @@ export HF_HOME=/scr/biggest/oshaikh/hf_cache
 export TRANSFORMERS_CACHE=/scr/biggest/oshaikh/hf_cache
 export RAY_DEBUG=legacy
 export RAY_DEBUG_EXTERNAL=True
+export RAY_DEBUG_POST_MORTEM=1
+export HYDRA_FULL_ERROR=1
+export CUDA_VISIBLE_DEVICES=0
 
 python3 -m verl.trainer.main_ppo \
-  +ray_kwargs.ray_init.num_cpus=10 \
+  +ray_kwargs.ray_init.num_cpus=5 \
   trainer.total_epochs=1 \
   trainer.experiment_name="test-lora-trainer" \
   trainer.n_gpus_per_node=2 \
@@ -27,12 +30,12 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.model.exclude_modules='.*visual.*' \
   actor_rollout_ref.model.use_remove_padding=True \
   actor_rollout_ref.rollout.name=vllm \
-  actor_rollout_ref.rollout.prompt_length=8192 \
-  actor_rollout_ref.rollout.response_length=8192 \
+  actor_rollout_ref.rollout.prompt_length=2048 \
+  actor_rollout_ref.rollout.response_length=1024 \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
-  actor_rollout_ref.actor.ppo_mini_batch_size=16 \
+  actor_rollout_ref.actor.ppo_mini_batch_size=8 \
   actor_rollout_ref.rollout.val_kwargs.temperature=0.0 \
   actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
   actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
@@ -61,7 +64,9 @@ python3 -m verl.trainer.main_ppo \
   data.train_files="/scr/biggest/oshaikh/pack_data/train.parquet" \
   data.val_files="/scr/biggest/oshaikh/pack_data/validation.parquet" \
   data.train_batch_size=16 \
-  data.dataloader_num_workers=2 \
+  data.dataloader_num_workers=1 \
+  +data.add_generation_prompt=false \
+  +data.strip_final_special_token=true \
   algorithm.adv_estimator=grpo \
   algorithm.use_kl_in_reward=false \
   reward_model.enable=false \

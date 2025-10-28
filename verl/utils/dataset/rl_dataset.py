@@ -111,6 +111,8 @@ class RLHFDataset(Dataset):
         self.truncation = config.get("truncation", "error")
         self.filter_overlong_prompts = config.get("filter_overlong_prompts", True)
         self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
+        self.add_generation_prompt = config.get("add_generation_prompt", True)
+        self.strip_final_special_token = config.get("strip_final_special_token", False)
 
         self.num_workers = config.get("filter_overlong_prompts_workers", max(1, os.cpu_count() // 4))
         self.num_workers = min(self.num_workers, os.cpu_count())
@@ -172,8 +174,14 @@ class RLHFDataset(Dataset):
                     try:
                         messages = self._build_messages(doc)
                         raw_prompt = self.processor.apply_chat_template(
-                            messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
+                            messages, add_generation_prompt=self.add_generation_prompt, tokenize=False, **self.apply_chat_template_kwargs
                         )
+                        # Strip final tokens from raw_prompt string if configured
+                        if self.strip_final_special_token:
+                            temp_ids = tokenizer.encode(raw_prompt, add_special_tokens=False)
+                            temp_ids = temp_ids[:-2] if len(temp_ids) >= 2 else temp_ids
+                            raw_prompt = tokenizer.decode(temp_ids, skip_special_tokens=False)
+                        
                         images = (
                             [process_image(image) for image in doc[image_key]]
                             if image_key in doc and doc[image_key]
@@ -195,11 +203,16 @@ class RLHFDataset(Dataset):
 
                 def doc2len(doc) -> int:
                     try:
-                        return len(
-                            tokenizer.apply_chat_template(
-                                doc[prompt_key], add_generation_prompt=True, **self.apply_chat_template_kwargs
-                            )
+                        raw_prompt = tokenizer.apply_chat_template(
+                            doc[prompt_key], add_generation_prompt=self.add_generation_prompt, tokenize=False, **self.apply_chat_template_kwargs
                         )
+                        # Strip final tokens from raw_prompt string if configured
+                        if self.strip_final_special_token:
+                            temp_ids = tokenizer.encode(raw_prompt, add_special_tokens=False)
+                            temp_ids = temp_ids[:-2] if len(temp_ids) >= 2 else temp_ids
+                            raw_prompt = tokenizer.decode(temp_ids, skip_special_tokens=False)
+                        
+                        return len(tokenizer.encode(raw_prompt, add_special_tokens=False))
                     except Exception:
                         print("Error processing one of the samples, skipping...")
                         traceback.print_exc()
@@ -259,8 +272,14 @@ class RLHFDataset(Dataset):
             from verl.utils.dataset.vision_utils import process_image, process_video
 
             raw_prompt = self.processor.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
+                messages, add_generation_prompt=self.add_generation_prompt, tokenize=False, **self.apply_chat_template_kwargs
             )
+            # Strip final tokens from raw_prompt string if configured
+            if self.strip_final_special_token:
+                temp_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
+                temp_ids = temp_ids[:-2] if len(temp_ids) >= 2 else temp_ids
+                raw_prompt = self.tokenizer.decode(temp_ids, skip_special_tokens=False)
+            
             multi_modal_data = {}
 
             images = None
@@ -307,8 +326,14 @@ class RLHFDataset(Dataset):
                     "models like GLM can copy chat_template.jinja from instruct models"
                 )
             raw_prompt = self.tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
+                messages, add_generation_prompt=self.add_generation_prompt, tokenize=False, **self.apply_chat_template_kwargs
             )
+            # Strip final tokens from raw_prompt string if configured
+            if self.strip_final_special_token:
+                temp_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
+                temp_ids = temp_ids[:-2] if len(temp_ids) >= 2 else temp_ids
+                raw_prompt = self.tokenizer.decode(temp_ids, skip_special_tokens=False)
+            
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")

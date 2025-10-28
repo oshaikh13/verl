@@ -255,6 +255,7 @@ class vLLMRollout(BaseRollout):
         self.tokenizer = tokenizer
         self.pad_token_id = tokenizer.pad_token_id
 
+
         self.think_cfg = getattr(config, "think_revise", None)
         if self.think_cfg and self.think_cfg.enable:
             dedup_fn = partial(jaccard_ngrams, n=3)
@@ -263,7 +264,8 @@ class vLLMRollout(BaseRollout):
                 dedup_threshold=self.think_cfg.dedup_jaccard,
                 dedup_sim_fn=dedup_fn,
             )
-            self._dist_retr = DistributedRetriever(
+            self._dist_retr = None
+            DistributedRetriever(
                 retriever_factory=retriever_factory,
                 default_namespace=self.think_cfg.memory_namespace,
                 shared=self.think_cfg.share_across_workers,
@@ -311,6 +313,7 @@ class vLLMRollout(BaseRollout):
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
+
         if self.think_cfg and self.think_cfg.enable:
             return self._generate_sequences_think_revise(prompts)
 
@@ -512,12 +515,11 @@ class vLLMRollout(BaseRollout):
             instruction_tokens_list.append(instruction_tokens)
             current_prompt_tokens.append(list(base_tokens) + instruction_tokens)
 
-        breakpoint()
 
         think_ids_list, think_logps_list = self._run_vllm_prompts(
             current_prompt_tokens,
             multi_modal_list,
-            stop=think_cfg.think_stop,
+            # stop=think_cfg.think_stop,
             max_tokens=think_cfg.think_max_tokens,
         )
 
@@ -563,7 +565,7 @@ class vLLMRollout(BaseRollout):
             n_claims_list,
             strict=True,
         ):
-            suffix_text = "</think>\n" + think_cfg.revise_instruction.format(
+            suffix_text = "<|im_end|>\n<|im_start|>user\n" + think_cfg.revise_instruction.format(
                 retrieved=retrieved,
                 n_claims=n_claims,
             )
@@ -574,7 +576,7 @@ class vLLMRollout(BaseRollout):
         revise_ids_list, revise_logps_list = self._run_vllm_prompts(
             current_prompt_tokens_stage2,
             multi_modal_list,
-            stop=think_cfg.revise_stop,
+            # stop=think_cfg.revise_stop,
             max_tokens=think_cfg.revise_max_tokens,
         )
 
@@ -592,7 +594,7 @@ class vLLMRollout(BaseRollout):
             future_len_list,
             strict=True,
         ):
-            suffix_text = "</revise>\n" + think_cfg.actions_instruction.format(future_len=future_len)
+            suffix_text = "<|im_end|>\n<|im_start|>user\n" + think_cfg.actions_instruction.format(future_len=future_len)
             suffix_tokens = tokenizer.encode(suffix_text, add_special_tokens=False)
             actions_suffix_tokens_list.append(suffix_tokens)
             current_prompt_tokens_stage3.append(prompt_tokens + revise_ids + suffix_tokens)
@@ -600,7 +602,7 @@ class vLLMRollout(BaseRollout):
         actions_ids_list, actions_logps_list = self._run_vllm_prompts(
             current_prompt_tokens_stage3,
             multi_modal_list,
-            stop=think_cfg.actions_stop,
+            # stop=think_cfg.actions_stop,
             max_tokens=think_cfg.actions_max_tokens,
         )
 
@@ -692,13 +694,13 @@ class vLLMRollout(BaseRollout):
 
         response = pad_2d_list_to_length(
             response_sequences,
-            padding_value=self.pad_token_id,
+            pad_token_id=self.pad_token_id,
             max_length=max_response_length,
         ).to(idx.device)
 
         response_mask = pad_2d_list_to_length(
             mask_sequences,
-            padding_value=0,
+            pad_token_id=0,
             max_length=max_response_length,
         ).to(idx.device)
         response_mask = response_mask.to(attention_mask.dtype)
@@ -706,7 +708,7 @@ class vLLMRollout(BaseRollout):
         if need_logprobs:
             rollout_log_probs = pad_2d_list_to_length(
                 logprob_sequences,
-                padding_value=0.0,
+                pad_token_id=0.0,
                 max_length=max_response_length,
             ).to(idx.device)
             rollout_log_probs = rollout_log_probs.to(torch.float32)
@@ -748,8 +750,8 @@ class vLLMRollout(BaseRollout):
         self,
         prompt_token_ids: Sequence[Sequence[int]],
         multi_modal_list: Sequence | None,
-        stop: str | None,
         max_tokens: int,
+        stop: str | None = None,
     ) -> tuple[list[list[int]], list[list[float]]]:
         vllm_inputs = []
         multi_modal_list = multi_modal_list or [None] * len(prompt_token_ids)
