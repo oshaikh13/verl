@@ -108,16 +108,30 @@ class ThinkReviseConfig(BaseConfig):
     actions_stop: str = "</actions>"
     think_instruction: str = (
         "Analyze the user’s likely next steps. First, generate exactly {n_claims} claim about the user.\n"
-        "Output them ONLY as <claim>...</claim> tags inside the <think> block.<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        "Output each claim between <claim></claim> tags inside a larger <think> block.\n\n"
+        "The output should be formatted as follows:\n"
+        "<think>\n"
+        "<claim> ...claim content... </claim>\n"
+        "<claim> ...claim content... </claim>\n"
+        "...\n"
+        "</think>"
+        "<|im_end|>\n<|im_start|>assistant\n<think>\n"
     )
     revise_instruction: str = (
         "Here are retrieved claims and context (time-aware):\n{retrieved}\n\n"
         "Using your claims and the retrieved context, generate a final set of {n_claims} revised claims.\n"
-        "Output them ONLY as <claim>...</claim> tags inside a <revise> block.<|im_end|>\n<|im_start|>assistant\n<revise>\n"
+        "Output each revised claim between <claim></claim> tags inside a larger <revise> block.\n\n"
+        "The output should be formatted as follows:\n"
+        "<revise>\n"
+        "<claim> ...revised claim content... </claim>\n"
+        "<claim> ...revised claim content... </claim>\n"
+        "...\n"
+        "</revise>"
+        "<|im_end|>\n<|im_start|>assistant\n<revise>\n"
     )
     actions_instruction: str = (
         "Now, using your claims, generate exactly {future_len} next actions the user will take.\n"
-        "Output them ONLY as <action>...</action> tags inside <actions> block, with each action wrapped in its own <action> tag.<|im_end|>\n<|im_start|>assistant\n<actions>\n"
+        "Output each action between <action></action> tags inside a larger <actions> block.<|im_end|>\n<|im_start|>assistant\n<actions>\n"
     )
     retriever_top_k: int = 8
     memory_top_m: int = 3

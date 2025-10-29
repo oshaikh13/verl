@@ -1,4 +1,4 @@
-
+**/.env
 **/*.pt
 **/checkpoints
 **/wget-log

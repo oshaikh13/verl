@@ -27,6 +27,7 @@ When working with Megatron:
 """
 
 import asyncio
+import gc
 import getpass
 import inspect
 import logging
@@ -515,6 +516,9 @@ class vLLMRollout(BaseRollout):
             instruction_tokens_list.append(instruction_tokens)
             current_prompt_tokens.append(list(base_tokens) + instruction_tokens)
 
+        # Free large list after use
+        del raw_prompt_ids_list
+        gc.collect()
 
         think_ids_list, think_logps_list = self._run_vllm_prompts(
             current_prompt_tokens,
@@ -573,6 +577,10 @@ class vLLMRollout(BaseRollout):
             revise_suffix_tokens_list.append(suffix_tokens)
             current_prompt_tokens_stage2.append(prompt_tokens + think_ids + suffix_tokens)
 
+        # Free memory after building stage2 prompts
+        del current_prompt_tokens, retrieved_texts
+        gc.collect()
+
         revise_ids_list, revise_logps_list = self._run_vllm_prompts(
             current_prompt_tokens_stage2,
             multi_modal_list,
@@ -599,12 +607,20 @@ class vLLMRollout(BaseRollout):
             actions_suffix_tokens_list.append(suffix_tokens)
             current_prompt_tokens_stage3.append(prompt_tokens + revise_ids + suffix_tokens)
 
+        # Free memory after building stage3 prompts
+        del current_prompt_tokens_stage2
+        gc.collect()
+
         actions_ids_list, actions_logps_list = self._run_vllm_prompts(
             current_prompt_tokens_stage3,
             multi_modal_list,
             # stop=think_cfg.actions_stop,
             max_tokens=think_cfg.actions_max_tokens,
         )
+        
+        # Free memory after actions stage
+        del current_prompt_tokens_stage3
+        gc.collect()
 
         if self._dist_retr:
             rows = []
@@ -793,6 +809,10 @@ class vLLMRollout(BaseRollout):
                 logps_list.append(curr_logps)
             else:
                 logps_list.append([])
+
+        # Explicitly delete vLLM outputs to free memory (especially CPU RAM)
+        del outputs
+        gc.collect()
 
         return ids_list, logps_list
 

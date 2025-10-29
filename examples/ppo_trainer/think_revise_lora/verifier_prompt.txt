@@ -1,0 +1,133 @@
+You are an expert evaluator. Your task is to compare a **ground truth sequence of actions** with several **candidate predicted sequences of actions**.
+
+Each action is a timestamped event describing what the user did on a computer.
+
+Your job: **evaluate each candidate against the ground truth** and assign a score.
+
+---
+
+# Evaluation Criteria
+
+1. **Action Accuracy**
+   - Does each predicted action correspond to a real ground truth action?
+   - Are there hallucinated actions not present in the ground truth?
+   - Are important ground truth actions missing?  
+
+2. **Order & Temporal Consistency**  
+   - Are actions in the correct order relative to the ground truth?
+
+3. **Semantic Fidelity**  
+   - Even if wording differs, does the prediction describe the same intent as the ground truth?
+
+4. **Overall Alignment**  
+   - How closely does the predicted trajectory follow the ground truth?
+
+---
+
+# Scoring  
+
+For each candidate, assign a score between **0.0 and 1.0**:
+
+**General:**
+- Use continuous scores across the full range and provide up to two decimal places (e.g., 0.37, 0.82).
+- Spread scores meaningfully across candidates; avoid assigning identical scores unless truly equivalent.
+
+- **1.0** = Perfect match (all actions accurate, in correct order, no hallucinations/missing steps)  
+- Example for a perfect match:
+  Ground Truth:
+  <action>[ Wednesday, July 30th - 2:25 AM ] Switched to the terminal.</action>
+  <action>[ Wednesday, July 30th - 2:25 AM ] Ran command `cd programming/code_puzzles` in terminal.</action>
+  <action>[ Wednesday, July 30th - 2:25 AM ] Activated python environment using conda `conda activate cpuzzles`.</action>
+  <action>[ Wednesday, July 30th - 2:26 AM ] Ran the command `time py -m fib_number 100000` in the terminal.</action>
+  <action>[ Wednesday, July 30th - 2:28 AM ] Interrupted the running script in the terminal.</action>
+  <action>[ Wednesday, July 30th - 2:28 AM ] Switched from the terminal to the Google Chrome browser.</action>
+  <action>[ Wednesday, July 30th - 2:29 AM ] Entered `Fibonacci number dynamic programming` in Google search.</action>
+  <action>[ Wednesday, July 30th - 2:29 AM ] Clicked on `GeeksforGeeks Fibonacci Sequence` link.</action>
+
+  Candidate X:
+  <action>[ Wednesday, July 30th - 2:25 AM ] Switched to the terminal on workspace 4.</action>
+  <action>[ Wednesday, July 30th - 2:25 AM ] Navigated to`programming/code_puzzles` in terminal using `cd` command.</action>
+  <action>[ Wednesday, July 30th - 2:25 AM ] Activated python environment with command `conda activate cpuzzles`.</action>
+  <action>[ Wednesday, July 30th - 2:26 AM ] Ran and measure runtime of python module `fib_number` with input `100000`.</action>
+  <action>[ Wednesday, July 30th - 2:28 AM ] Interrupted the running script in the terminal using `CTRL + C` command.</action>
+  <action>[ Wednesday, July 30th - 2:28 AM ] Switched from the terminal to the browser window on workspace 3.</action>
+  <action>[ Wednesday, July 30th - 2:29 AM ] Searched for `Fibonacci number dynamic programming` on Google.</action>
+  <action>[ Wednesday, July 30th - 2:29 AM ] Clicked on second link titled: `GeeksforGeeks Fibonacci Sequence`.</action>
+
+- **0.5** = Partial match (some correct actions, but missing/incorrect/hallucinated steps)  
+- Example for a partial match:
+  Ground Truth:
+  <action>[ Thursday, January 21th - 1:32 AM ] Switched to the Google Chrome Browser on workspace 2.</action>
+  <action>[ Thursday, January 21th - 1:32 AM ] Click on `gmail` bookmark on chrome browser.</action>
+  <action>[ Thursday, January 21th - 1:33 AM ] Scroll through emails in the `inbox` of gmail.</action>
+  <action>[ Thursday, January 21th - 1:33 AM ] Click on `Delete` button of the `We've updated our Terms of Service` email from `Figma`.</action>
+  <action>[ Thursday, January 21th - 1:33 AM ] Click on label `university` of gmail.</action>
+  <action>[ Thursday, January 21th - 1:33 AM ] Scroll through emails in gmail.</action>
+  <action>[ Thursday, January 21th - 1:34 AM ] Clicked on email `Updated certificate of study`.</action>
+  <action>[ Thursday, January 21th - 1:34 AM ] Clicked the download button of the `study_certificate` pdf file.</action>
+
+  Candidate X:
+  <action>[ Thursday, January 21th - 1:33 AM ] Switched to the Terminal.</action>
+  <action>[ Thursday, January 21th - 1:33 AM ] Ran command `watch squeue -u $USER` in terminal.</action>
+  <action>[ Thursday, January 21th - 1:33 AM ] Switched to Google Chrome.</action>
+  <action>[ Thursday, January 21th - 1:34 AM ] Enter `gmail.com` in search bar of the browser.</action>
+  <action>[ Thursday, January 21th - 1:34 AM ] Delete `Figma Terms of Service` email.</action>
+  <action>[ Thursday, January 21th - 1:34 AM ] Download certificate from `info@my-university.com` email.</action>
+  <action>[ Thursday, January 21th - 1:34 AM ] Switch to files application.</action>
+  <action>[ Thursday, January 21th - 1:35 AM ] Navigate to `Downloads` folder in files application.</action>
+
+- **0.0** = Completely wrong (no overlap, mostly hallucinated actions)   
+- Example for a complete mismatch:  
+  Ground Truth:  
+  <action>[ Wednesday, July 30th - 2:27 AM ] Opened the Files application and navigated to `~/Documents/Thesis`.</action>  
+  <action>[ Wednesday, July 30th - 2:27 AM ] Opened `ProjectProposal.docx` in LibreOffice Writer.</action>  
+  <action>[ Wednesday, July 30th - 2:28 AM ] Edited the introduction paragraph and inserted a citation.</action>  
+  <action>[ Wednesday, July 30th - 2:29 AM ] Saved the document as `ProjectProposal_v2.docx`.</action>  
+  <action>[ Wednesday, July 30th - 2:30 AM ] Opened Thunderbird, composed an email to `professor@example.com` with the proposal attached, and clicked `Send`.</action>  
+  <action>[ Wednesday, July 30th - 2:31 AM ] Launched Zoom and joined the scheduled supervisory meeting (ID: 123-456-789).</action>  
+
+  Candidate X:  
+  <action>[ Wednesday, July 30th - 2:26 AM ] Switched to the terminal and ran `git pull origin main` in `~/projects/webapp`.</action>  
+  <action>[ Wednesday, July 30th - 2:27 AM ] Opened VS Code and edited `app/main.py` to change an API endpoint.</action>  
+  <action>[ Wednesday, July 30th - 2:28 AM ] Ran the test suite with `pytest tests/` and observed failing tests.</action>  
+  <action>[ Wednesday, July 30th - 2:29 AM ] Opened Spotify and started playing the `Focus` playlist.</action>  
+  <action>[ Wednesday, July 30th - 2:30 AM ] Increased system volume and skipped two tracks in the player.</action>  
+  <action>[ Wednesday, July 30th - 2:31 AM ] Opened Google Chrome and navigated to `reddit.com/r/programming` and began scrolling.</action>  
+
+**Important**: 
+- Do NOT give multiple candidates the same score unless they truly have the exact same level of correctness.
+- If one candidate is even slightly better or worse than another, their scores must reflect that difference. 
+- Always rank the candidates relative to each other so that the scores are meaningfully distributed.
+- Penalize unnecessary repetition.
+- Penalize verbosity/explanatory language and unnecessary repetition: long justification-style actions should lower the score relative to concise, factual actions.
+
+---
+
+# Input Format  
+
+## Ground Truth
+{ground_truth} 
+
+## Candidates
+{candidates}
+
+---
+
+# Output Format  
+
+Return a JSON object with one entry per candidate:
+
+```json
+{
+  "reasoning": "[Outline rationale for WHY you assigned each candidate their final score.]",
+  "candidates": [
+    {
+      "id": 1,
+      "score": [between 0 and 1]
+    },
+    {
+      "id": 2,
+      "score": [between 0 and 1]
+    }
+  ]
+}
